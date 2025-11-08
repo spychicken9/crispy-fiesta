@@ -328,6 +328,100 @@ async def lookup(interaction: discord.Interaction,
     await interaction.followup.send("Multiple matches found. Please choose:", view=view, ephemeral=False)
 
 
+# ---------- COMMANDS: Edit ----------
+@bot.tree.command(name="edit_name", description="(Officers) Edit a member's name fields.")
+@app_commands.describe(
+    nickname="Existing nickname to identify the member",
+    first_name="New first name (optional)",
+    last_name="New last name (optional)",
+    new_nickname="New nickname (optional)",
+    honorific="Honorific (e.g., Mr., Ms., Mx.) (optional)"
+)
+async def edit_name(interaction: discord.Interaction,
+                    nickname: str,
+                    first_name: str | None = None,
+                    last_name: str | None = None,
+                    new_nickname: str | None = None,
+                    honorific: str | None = None):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
+    try:
+        db.update_member_name(nickname, first_name=first_name, last_name=last_name,
+                              new_nickname=new_nickname, honorific=honorific)
+        new_n = new_nickname if new_nickname else nickname
+        await interaction.response.send_message(f"Updated name for **{new_n}**.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="edit_profile", description="(Officers) Edit profile fields (any subset).")
+@app_commands.describe(
+    nickname="Member nickname",
+    major="Major", age="Age", ethnicity="Ethnicity",
+    hometown="Hometown", discord_handle="Discord handle (e.g., @user)"
+)
+async def edit_profile(interaction: discord.Interaction, nickname: str,
+                       major: str | None = None, age: int | None = None,
+                       ethnicity: str | None = None, hometown: str | None = None,
+                       discord_handle: str | None = None):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
+    try:
+        db.update_member_profile(nickname, major=major, age=age, ethnicity=ethnicity,
+                                 hometown=hometown, discord_handle=discord_handle)
+        await interaction.response.send_message(f"Updated profile for **{nickname}**.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="edit_social", description="(Officers) Add or update a member's social handle.")
+@app_commands.describe(
+    nickname="Member nickname",
+    platform="instagram / x / linkedin / other",
+    handle="Handle or URL (e.g., @name or https://...)"
+)
+async def edit_social(interaction: discord.Interaction, nickname: str, platform: str, handle: str):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
+    try:
+        db.set_social(nickname, platform, handle)  # upserts
+        await interaction.response.send_message(f"Updated **{platform}** for **{nickname}**.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+
+
+# ---------- COMMANDS: Edit join order ----------
+@bot.tree.command(name="swap_display", description="(Officers) Swap two brothers' display positions (numbers stay the same).")
+@app_commands.describe(number_a="Roll number of first brother", number_b="Roll number of second brother")
+async def swap_display(interaction: discord.Interaction, number_a: int, number_b: int):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
+    try:
+        db.swap_display_positions(number_a, number_b)
+        await interaction.response.send_message(
+            f"Swapped display positions of **#{number_a}** and **#{number_b}** (roll numbers unchanged).",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="move_display", description="(Officers) Move a brother to appear right AFTER another (numbers stay the same).")
+@app_commands.describe(number="Brother to move (roll number)", target_after="Place him after this roll number")
+async def move_display(interaction: discord.Interaction, number: int, target_after: int):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
+    try:
+        db.move_display_after(number, target_after)
+        await interaction.response.send_message(
+            f"Moved **#{number}** to appear after **#{target_after}** (roll numbers unchanged).",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+
+
+
 # ---------- MAIN ----------
 if __name__ == "__main__":
     if not TOKEN:

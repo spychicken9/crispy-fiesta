@@ -103,6 +103,67 @@ def _member_id_by_nick(nick: str) -> Optional[int]:
         row = cx.execute("SELECT id FROM members WHERE LOWER(nickname)=LOWER(?)", (nick,)).fetchone()
         return row[0] if row else None
 
+# ---------- edit join order ----------
+def _member_core_by_roll(roll_number: int):
+    """Return (id, class_id, join_order, nickname) for a roll number, or None."""
+    with _conn() as cx:
+        row = cx.execute(
+            "SELECT id, class_id, join_order, nickname FROM members WHERE roll_number=?",
+            (roll_number,)
+        ).fetchone()
+        return row  # (id, class_id, join_order, nickname) or None
+
+
+def _renormalize_join_order(class_id: int):
+    """Compact join_order to 1..N for a class, preserving current relative order."""
+    with _conn() as cx:
+        rows = cx.execute(
+            "SELECT id FROM members WHERE class_id=? ORDER BY join_order ASC, id ASC",
+            (class_id,)
+        ).fetchall()
+        for i, (mid,) in enumerate(rows, start=1):
+            cx.execute("UPDATE members SET join_order=? WHERE id=?", (i, mid))
+        cx.commit()
+
+
+def swap_display_positions(number_a: int, number_b: int):
+    """Swap two members' join_order within the (same) class. Roll numbers unchanged."""
+    a = _member_core_by_roll(number_a)
+    b = _member_core_by_roll(number_b)
+    if not a or not b:
+        raise ValueError("Both roll numbers must exist.")
+    a_id, a_cid, a_ord, _ = a
+    b_id, b_cid, b_ord, _ = b
+    if a_cid != b_cid:
+        raise ValueError("Members must be in the same class to swap display positions.")
+
+    with _conn() as cx:
+        # Use a temp to avoid unique conflicts if you ever enforce uniqueness on join_order
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (-1, a_id))
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (a_ord, b_id))
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (b_ord, a_id))
+        cx.commit()
+    _renormalize_join_order(a_cid)
+
+
+def move_display_after(number: int, target_after: int):
+    """Move 'number' to appear immediately after 'target_after' in the same class."""
+    src = _member_core_by_roll(number)
+    tgt = _member_core_by_roll(target_after)
+    if not src or not tgt:
+        raise ValueError("Both roll numbers must exist.")
+    s_id, s_cid, s_ord, _ = src
+    t_id, t_cid, t_ord, _ = tgt
+    if s_cid != t_cid:
+        raise ValueError("Members must be in the same class to move display order.")
+
+    with _conn() as cx:
+        # Put the source at a fractional position then renormalize.
+        new_ord = t_ord + 0.5
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (new_ord, s_id))
+        cx.commit()
+    _renormalize_join_order(s_cid)
+
 
 # ---------- skipped numbers ----------
 def add_skipped_number(number: int):
@@ -375,3 +436,40 @@ def reorder_member_swap(old_number: int, new_number: int):
         cx.execute("UPDATE members SET roll_number=? WHERE id=?", (old_number, b_id))
         cx.execute("UPDATE members SET roll_number=? WHERE id=?", (new_number, a_id))
         cx.commit()
+
+# ---------- editing ----------
+def update_member_name(nickname: str,
+                       first_name: str | None = None,
+                       last_name:  str | None = None,
+                       new_nickname: str | None = None,
+                       honorific: str | None = None):
+    """Update name-related fields; recomputes full_name if first/last changes."""
+    mid = _member_id_by_nick(nickname)
+    if mid is None:
+        raise ValueError("Member not found.")
+
+    with _conn() as cx:
+        cur = cx.execute("SELECT first_name, last_name FROM members WHERE id=?", (mid,)).fetchone()
+        cur_first, cur_last = cur[0], cur[1]
+
+        new_first = first_name if first_name is not None else cur_first
+        new_last  = last_name  if last_name  is not None else cur_last
+        new_full  = f"{new_first} {new_last}"
+
+        sets, args = [], []
+        if first_name is not None:  sets.append("first_name=?");  args.append(first_name)
+        if last_name  is not None:  sets.append("last_name=?");   args.append(last_name)
+        if new_nickname is not None: sets.append("nickname=?");   args.append(new_nickname)
+        if honorific is not None:   sets.append("honorific=?");   args.append(honorific)
+
+        # Always refresh full_name if first/last changed
+        if first_name is not None or last_name is not None:
+            sets.append("full_name=?"); args.append(new_full)
+
+        if not sets:
+            return  # nothing to change
+
+        args.append(mid)
+        cx.execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?", tuple(args))
+        cx.commit()
+
