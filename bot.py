@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import db
 
 # ------------- CONFIG -------------
-GUILD_ID = None                  # set to your server id (int) to sync faster; or leave None
+GUILD_ID = 1047618310012936313                  # set to your server id (int) to sync faster; or leave None
 ALLOWED_ROLES = {"President", "PD", "Technician"}  # who can add/remove/edit
 
 # ------------- ENV / BOT -------------
@@ -40,15 +40,17 @@ def officer_only(interaction: discord.Interaction) -> bool:
 # ------------- STARTUP -------------
 @bot.event
 async def on_ready():
-    db.init_db()
-    try:
-        if GUILD_ID:
-            await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        else:
-            await bot.tree.sync()
-        print(f"Logged in as {bot.user} (synced commands).")
-    except Exception as e:
-        print("Sync error:", e)
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.copy_global_to(guild=guild)
+    await bot.tree.sync(guild=guild)
+    print(f"Commands synced to guild {GUILD_ID}")
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    await bot.tree.sync()
+    print("Slash commands synced.")
 
 # ------------- COMMANDS -------------
 
