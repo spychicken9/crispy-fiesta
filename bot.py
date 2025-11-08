@@ -10,7 +10,7 @@ import db
 
 # ---------- CONFIG ----------
 TOKEN = os.environ.get("DISCORD_TOKEN")
-GUILD_ID = os.environ.get("GUILD_ID")  # optional; set to force instant guild sync
+GUILD_ID = os.environ.get("1047618310012936313")  # optional; set to force instant guild sync
 
 # Officer roles allowed to modify roster
 OFFICER_ROLES = {"President", "PD"}  # edit names to match your server
