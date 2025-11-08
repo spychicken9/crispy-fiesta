@@ -87,10 +87,20 @@ def _member_id_by_nick(nick: str) -> Optional[int]:
 
 def _next_roll_number() -> int:
     with _conn() as cx:
+        # Get the max assigned roll number
         last = cx.execute("SELECT MAX(roll_number) FROM members").fetchone()[0]
         if last is None:
-            return 2   # start at #2
-        return last + 1
+            last = 1  # we start counting from 2 anyway below
+
+        # Load all skipped numbers into a set
+        skipped = {row[0] for row in cx.execute("SELECT roll_number FROM skipped_numbers")}
+
+        # Start from last+1 and find the next number not in skipped
+        next_num = last + 1
+        while next_num in skipped:
+            next_num += 1
+
+        return next_num
 
 
 # ---------- classes ----------
@@ -153,6 +163,12 @@ def add_member(class_name: str, first_name: str, last_name: str, nickname: str, 
                                 join_order, roll_number, bio)
             VALUES(?,?,?,?,?,?,?,?)
         """, (cid, first_name, last_name, nickname, full, join_order, roll_number, bio))
+
+        cx.execute("""
+    CREATE TABLE IF NOT EXISTS skipped_numbers (
+        roll_number INTEGER PRIMARY KEY
+    )
+""")
 
 
 def remove_member(nickname: str) -> None:
@@ -332,3 +348,18 @@ def get_littles(nickname: str) -> list[str]:
             FROM family f JOIN members m ON f.member_id = m.id
             WHERE f.big_id=?
         """, (mid,)).fetchall()]
+
+def add_skipped_number(number: int):
+    with _conn() as cx:
+        cx.execute("INSERT OR IGNORE INTO skipped_numbers (roll_number) VALUES (?)", (number,))
+        cx.commit()
+
+def remove_skipped_number(number: int):
+    with _conn() as cx:
+        cx.execute("DELETE FROM skipped_numbers WHERE roll_number = ?", (number,))
+        cx.commit()
+
+def get_skipped_numbers():
+    with _conn() as cx:
+        rows = cx.execute("SELECT roll_number FROM skipped_numbers ORDER BY roll_number ASC").fetchall()
+    return [row[0] for row in rows]

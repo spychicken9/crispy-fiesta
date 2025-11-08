@@ -252,5 +252,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
     except Exception as e:
         print("Failed to notify user about error:", e)
 
+@bot.tree.command(name="skip_number", description="Mark a roll number as skipped (blackballed).")
+@app_commands.describe(number="The roll number to skip.")
+async def skip_number(interaction: discord.Interaction, number: int):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("You don't have permission to do that.", ephemeral=True)
+        return
+
+    db.add_skipped_number(number)
+    await interaction.response.send_message(f"Roll number #{number} has been marked as skipped.", ephemeral=True)
+
+
+@bot.tree.command(name="unskip_number", description="Remove a roll number from the skipped list.")
+@app_commands.describe(number="The roll number to unskip.")
+async def unskip_number(interaction: discord.Interaction, number: int):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("You don't have permission to do that.", ephemeral=True)
+        return
+
+    db.remove_skipped_number(number)
+    await interaction.response.send_message(f"Roll number #{number} has been unskipped.", ephemeral=True)
+
+
 # ------------- RUN -------------
 bot.run(TOKEN)
