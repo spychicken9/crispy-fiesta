@@ -1,29 +1,34 @@
-# at the top of db.py
+# db.py
+# SQLite storage and helpers for the fraternity bot.
+
 import os
-from pathlib import Path
-
-# DB_PATH will be:
-# - /data/roster.sqlite3 on Railway
-# - roster.sqlite3 locally
-DB_PATH = Path(os.environ.get("DB_PATH", "roster.sqlite3"))
-
-# SQLite storage for classes, members, socials, and family relations.
 import sqlite3
+from pathlib import Path
 from typing import Optional, Iterable
+
+# On Railway set: DB_PATH=/data/roster.sqlite3 (persistent volume mounted at /data)
+DB_PATH = Path(os.environ.get("DB_PATH", "roster.sqlite3"))
 
 
 # ---------- connection ----------
 def _conn() -> sqlite3.Connection:
     cx = sqlite3.connect(DB_PATH)
-    # Return rows as tuples (default). If you want dict-like rows, set row_factory.
     return cx
 
 
 # ---------- schema ----------
-def init_db() -> None:
-    """Create tables if they don't exist."""
+def _add_column_if_missing(table: str, col: str, decl: str):
     with _conn() as cx:
-        # Classes are ordered globally by order_index (lower appears earlier)
+        cols = [r[1] for r in cx.execute(f"PRAGMA table_info({table})").fetchall()]
+        if col not in cols:
+            cx.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            cx.commit()
+
+
+def init_db() -> None:
+    """Create tables if they don't exist, and add new columns idempotently."""
+    with _conn() as cx:
+        # Classes: global ordered list
         cx.execute("""
             CREATE TABLE IF NOT EXISTS classes(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +37,7 @@ def init_db() -> None:
             );
         """)
 
-        # Members: split names + global roll number + class join order
+        # Members
         cx.execute("""
             CREATE TABLE IF NOT EXISTS members(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,17 +45,17 @@ def init_db() -> None:
                 first_name TEXT    NOT NULL,
                 last_name  TEXT    NOT NULL,
                 nickname   TEXT    NOT NULL,
-                full_name  TEXT,              -- optional convenience
-                join_order INTEGER NOT NULL,  -- order within the class
-                roll_number INTEGER UNIQUE,   -- global running number
+                full_name  TEXT,
+                join_order INTEGER NOT NULL,
+                roll_number INTEGER UNIQUE,
                 honorific  TEXT NOT NULL DEFAULT 'Mr.',
                 bio        TEXT DEFAULT NULL,
-                UNIQUE(class_id, nickname),
-                FOREIGN KEY(class_id) REFERENCES classes(id)
+                FOREIGN KEY(class_id) REFERENCES classes(id),
+                UNIQUE(class_id, nickname)
             );
         """)
 
-        # Social handles: 1 row per platform
+        # Member socials
         cx.execute("""
             CREATE TABLE IF NOT EXISTS member_socials(
                 member_id INTEGER NOT NULL,
@@ -61,7 +66,7 @@ def init_db() -> None:
             );
         """)
 
-        # Family: each member can have one big; littles are the members pointing to you
+        # Family (one big; multiple littles via reverse lookup)
         cx.execute("""
             CREATE TABLE IF NOT EXISTS family(
                 member_id INTEGER PRIMARY KEY,
@@ -70,6 +75,20 @@ def init_db() -> None:
                 FOREIGN KEY(big_id)    REFERENCES members(id)
             );
         """)
+
+        # Skipped/blackballed numbers (never reassigned)
+        cx.execute("""
+            CREATE TABLE IF NOT EXISTS skipped_numbers(
+                roll_number INTEGER PRIMARY KEY
+            );
+        """)
+
+    # Profile fields (added safely)
+    _add_column_if_missing("members", "major", "TEXT")
+    _add_column_if_missing("members", "age", "INTEGER")
+    _add_column_if_missing("members", "ethnicity", "TEXT")
+    _add_column_if_missing("members", "hometown", "TEXT")
+    _add_column_if_missing("members", "discord_handle", "TEXT")
 
 
 # ---------- id helpers ----------
@@ -85,54 +104,67 @@ def _member_id_by_nick(nick: str) -> Optional[int]:
         return row[0] if row else None
 
 
-def _next_roll_number() -> int:
+# ---------- skipped numbers ----------
+def add_skipped_number(number: int):
     with _conn() as cx:
-        # Get the max assigned roll number
+        cx.execute("INSERT OR IGNORE INTO skipped_numbers(roll_number) VALUES(?)", (number,))
+        cx.commit()
+
+
+def remove_skipped_number(number: int):
+    with _conn() as cx:
+        cx.execute("DELETE FROM skipped_numbers WHERE roll_number=?", (number,))
+        cx.commit()
+
+
+def get_skipped_numbers() -> list[int]:
+    with _conn() as cx:
+        rows = cx.execute("SELECT roll_number FROM skipped_numbers ORDER BY roll_number ASC").fetchall()
+    return [r[0] for r in rows]
+
+
+# ---------- roll numbering ----------
+def _next_roll_number() -> int:
+    """Next roll number, starting at 2, skipping blackballed numbers."""
+    with _conn() as cx:
         last = cx.execute("SELECT MAX(roll_number) FROM members").fetchone()[0]
         if last is None:
-            last = 1  # we start counting from 2 anyway below
-
-        # Load all skipped numbers into a set
-        skipped = {row[0] for row in cx.execute("SELECT roll_number FROM skipped_numbers")}
-
-        # Start from last+1 and find the next number not in skipped
-        next_num = last + 1
-        while next_num in skipped:
-            next_num += 1
-
-        return next_num
+            last = 1  # start at 2
+        skipped = {r[0] for r in cx.execute("SELECT roll_number FROM skipped_numbers").fetchall()}
+        n = last + 1
+        while n in skipped:
+            n += 1
+        return n
 
 
 # ---------- classes ----------
 def add_class(name: str, order_index: int) -> None:
-    """Create a class that displays in the given global order."""
     with _conn() as cx:
         cx.execute("INSERT INTO classes(name, order_index) VALUES(?, ?)", (name.strip(), order_index))
+        cx.commit()
 
 
 def remove_class(name: str) -> None:
-    """Remove a class and everything under it (members, socials, family edges)."""
     with _conn() as cx:
-        # delete socials for members in this class
+        # Remove socials/family for members in this class
         cx.execute("""
             DELETE FROM member_socials
             WHERE member_id IN (
-                SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
+              SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
             )
         """, (name,))
-        # delete family edges for members in this class (as child or as big)
         cx.execute("""
             DELETE FROM family
             WHERE member_id IN (
-                SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
+              SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
             )
             OR big_id IN (
-                SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
+              SELECT m.id FROM members m JOIN classes c ON m.class_id=c.id WHERE c.name=?
             )
         """, (name, name))
-        # delete members and class
         cx.execute("DELETE FROM members WHERE class_id=(SELECT id FROM classes WHERE name=?)", (name,))
         cx.execute("DELETE FROM classes WHERE name=?", (name,))
+        cx.commit()
 
 
 def list_classes() -> Iterable[tuple[int, str, int]]:
@@ -141,38 +173,25 @@ def list_classes() -> Iterable[tuple[int, str, int]]:
 
 
 # ---------- members ----------
-def add_member(class_name: str, first_name: str, last_name: str, nickname: str, bio: Optional[str] = None) -> None:
-    """Add a member to a class; assigns next join_order in class and next global roll_number."""
+def add_member(class_name: str, first_name: str, last_name: str, nickname: str, bio: Optional[str] = None) -> int:
     cid = _class_id(class_name)
     if cid is None:
         raise ValueError(f"Class '{class_name}' does not exist.")
 
-    first_name = first_name.strip()
-    last_name  = last_name.strip()
-    nickname   = nickname.strip()
-
+    first_name, last_name, nickname = first_name.strip(), last_name.strip(), nickname.strip()
     with _conn() as cx:
-        join_order = cx.execute(
-            "SELECT COALESCE(MAX(join_order), 0) + 1 FROM members WHERE class_id=?", (cid,)
-        ).fetchone()[0]
+        join_order = cx.execute("SELECT COALESCE(MAX(join_order), 0) + 1 FROM members WHERE class_id=?", (cid,)).fetchone()[0]
         roll_number = _next_roll_number()
         full = f"{first_name} {last_name}"
-
         cx.execute("""
-            INSERT INTO members(class_id, first_name, last_name, nickname, full_name,
-                                join_order, roll_number, bio)
+            INSERT INTO members(class_id, first_name, last_name, nickname, full_name, join_order, roll_number, bio)
             VALUES(?,?,?,?,?,?,?,?)
         """, (cid, first_name, last_name, nickname, full, join_order, roll_number, bio))
-
-        cx.execute("""
-    CREATE TABLE IF NOT EXISTS skipped_numbers (
-        roll_number INTEGER PRIMARY KEY
-    )
-""")
+        cx.commit()
+        return roll_number
 
 
 def remove_member(nickname: str) -> None:
-    """Remove a member everywhere by nickname."""
     mid = _member_id_by_nick(nickname)
     if mid is None:
         return
@@ -180,77 +199,69 @@ def remove_member(nickname: str) -> None:
         cx.execute("DELETE FROM member_socials WHERE member_id=?", (mid,))
         cx.execute("DELETE FROM family WHERE member_id=? OR big_id=?", (mid, mid))
         cx.execute("DELETE FROM members WHERE id=?", (mid,))
+        cx.commit()
 
 
-# ---------- roster fetch (RAW fields for bot formatting) ----------
+# ---------- roster fetch (RAW fields) ----------
 def get_roster():
     """
-    Returns rows grouped by class. Each row is:
-        (class_name, first_name, nickname, last_name, roll_number, honorific)
-    If a class has no members yet, first_name will be NULL (None in Python) for that row.
-    Ordered by class order then join order within class.
+    Rows grouped by class:
+    (class_name, first_name, nickname, last_name, roll_number, honorific)
+    If a class has no members yet, first_name is NULL for that row.
     """
     with _conn() as cx:
         rows = cx.execute("""
-            SELECT
-                c.name       AS class_name,
-                m.first_name AS first_name,
-                m.nickname   AS nickname,
-                m.last_name  AS last_name,
-                m.roll_number,
-                m.honorific
+            SELECT c.name, m.first_name, m.nickname, m.last_name, m.roll_number, m.honorific
             FROM classes c
-            LEFT JOIN members m ON m.class_id = c.id
+            LEFT JOIN members m ON m.class_id=c.id
             ORDER BY c.order_index ASC, m.join_order ASC
         """).fetchall()
     return rows
 
 
 def get_class_roster(class_name: str):
-    """
-    Returns only the specified class. Each row is:
-        (first_name, nickname, last_name, roll_number, honorific)
-    Ordered by join order within that class.
-    """
     with _conn() as cx:
         rows = cx.execute("""
-            SELECT
-                m.first_name,
-                m.nickname,
-                m.last_name,
-                m.roll_number,
-                m.honorific
+            SELECT m.first_name, m.nickname, m.last_name, m.roll_number, m.honorific
             FROM members m
-            JOIN classes c ON m.class_id = c.id
-            WHERE c.name = ?
+            JOIN classes c ON m.class_id=c.id
+            WHERE c.name=?
             ORDER BY m.join_order ASC
         """, (class_name,)).fetchall()
     return rows
 
 
-# ---------- member detail / search ----------
+# ---------- lookups / cards ----------
+def lookup_members(first=None, last=None, nick=None, number=None):
+    q = ("SELECT m.roll_number, m.first_name, m.nickname, m.last_name, c.name "
+         "FROM members m JOIN classes c ON m.class_id=c.id WHERE 1=1")
+    args = []
+    if first:   q += " AND LOWER(m.first_name)=LOWER(?)"; args.append(first)
+    if last:    q += " AND LOWER(m.last_name)=LOWER(?)";  args.append(last)
+    if nick:    q += " AND LOWER(m.nickname)=LOWER(?)";   args.append(nick)
+    if number:  q += " AND m.roll_number=?";              args.append(number)
+    q += " ORDER BY m.roll_number ASC"
+    with _conn() as cx:
+        return cx.execute(q, tuple(args)).fetchall()
+
+
 def get_member_card_by(fields: dict):
-    """
-    Search by any of: number (int), first (str), last (str), nick (str).
-    OR-logic across provided keys. Returns a dict or None.
-    """
     where, args = [], []
     if fields.get("number") is not None:
-        where.append("roll_number = ?"); args.append(int(fields["number"]))
+        where.append("m.roll_number = ?"); args.append(int(fields["number"]))
     if fields.get("first"):
-        where.append("LOWER(first_name) = LOWER(?)"); args.append(fields["first"])
+        where.append("LOWER(m.first_name) = LOWER(?)"); args.append(fields["first"])
     if fields.get("last"):
-        where.append("LOWER(last_name) = LOWER(?)"); args.append(fields["last"])
+        where.append("LOWER(m.last_name) = LOWER(?)"); args.append(fields["last"])
     if fields.get("nick"):
-        where.append("LOWER(nickname) = LOWER(?)"); args.append(fields["nick"])
-
+        where.append("LOWER(m.nickname) = LOWER(?)"); args.append(fields["nick"])
     if not where:
         return None
 
     sql = f"""
-      SELECT m.id, m.first_name, m.last_name, m.nickname, m.roll_number, m.honorific, m.bio, c.name
-      FROM members m
-      JOIN classes c ON m.class_id=c.id
+      SELECT m.id, m.first_name, m.last_name, m.nickname, m.roll_number, m.honorific, m.bio,
+             c.name, m.major, m.age, m.ethnicity, m.hometown, m.discord_handle
+      FROM members m JOIN classes c ON m.class_id=c.id
       WHERE {' OR '.join(where)}
       LIMIT 1
     """
@@ -258,13 +269,11 @@ def get_member_card_by(fields: dict):
         row = cx.execute(sql, tuple(args)).fetchone()
         if not row:
             return None
-        (mid, first, last, nick, roll, honor, bio, classname) = row
+        (mid, first, last, nick, roll, honor, bio, classname,
+         major, age, ethnicity, hometown, discord_handle) = row
 
-        socials = dict(cx.execute(
-            "SELECT platform, handle FROM member_socials WHERE member_id=?", (mid,)
-        ).fetchall())
+        socials = dict(cx.execute("SELECT platform, handle FROM member_socials WHERE member_id=?", (mid,)).fetchall())
 
-        # family
         big_row = cx.execute("SELECT big_id FROM family WHERE member_id=?", (mid,)).fetchone()
         big = None
         if big_row and big_row[0] is not None:
@@ -272,16 +281,39 @@ def get_member_card_by(fields: dict):
             big = br[0] if br else None
 
         littles = [r[0] for r in cx.execute("""
-            SELECT m.nickname
-            FROM family f JOIN members m ON f.member_id=m.id
+            SELECT m.nickname FROM family f JOIN members m ON f.member_id=m.id
             WHERE f.big_id=?
         """, (mid,)).fetchall()]
 
     return {
         "first": first, "last": last, "nick": nick, "roll": roll, "honor": honor,
         "class": classname, "bio": bio, "socials": socials,
-        "big": big, "littles": littles
+        "big": big, "littles": littles,
+        "major": major, "age": age, "ethnicity": ethnicity,
+        "hometown": hometown, "discord": discord_handle
     }
+
+
+def update_member_profile(nickname: str,
+                          major: str | None = None,
+                          age: int | None = None,
+                          ethnicity: str | None = None,
+                          hometown: str | None = None,
+                          discord_handle: str | None = None):
+    mid = _member_id_by_nick(nickname)
+    if mid is None:
+        raise ValueError("Member not found.")
+    sets, args = [], []
+    if major is not None: sets.append("major=?"); args.append(major)
+    if age is not None: sets.append("age=?"); args.append(int(age))
+    if ethnicity is not None: sets.append("ethnicity=?"); args.append(ethnicity)
+    if hometown is not None: sets.append("hometown=?"); args.append(hometown)
+    if discord_handle is not None: sets.append("discord_handle=?"); args.append(discord_handle)
+    if not sets: return
+    args.append(mid)
+    with _conn() as cx:
+        cx.execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?", tuple(args))
+        cx.commit()
 
 
 # ---------- socials ----------
@@ -295,6 +327,7 @@ def set_social(nickname: str, platform: str, handle: str) -> None:
             VALUES(?,?,?)
             ON CONFLICT(member_id, platform) DO UPDATE SET handle=excluded.handle
         """, (mid, platform.lower(), handle))
+        cx.commit()
 
 
 def remove_social(nickname: str, platform: str) -> None:
@@ -303,63 +336,76 @@ def remove_social(nickname: str, platform: str) -> None:
         return
     with _conn() as cx:
         cx.execute("DELETE FROM member_socials WHERE member_id=? AND platform=?", (mid, platform.lower()))
+        cx.commit()
 
 
 # ---------- family ----------
 def set_big(nickname: str, big_nickname: Optional[str]) -> None:
-    """Set or clear a member's big (pass None/'' to clear)."""
     mid = _member_id_by_nick(nickname)
     if mid is None:
         raise ValueError("Member not found.")
-
     bid = None
     if big_nickname:
         bid = _member_id_by_nick(big_nickname)
         if bid is None:
             raise ValueError("Big not found.")
-
     with _conn() as cx:
         cx.execute("""
             INSERT INTO family(member_id, big_id) VALUES(?,?)
             ON CONFLICT(member_id) DO UPDATE SET big_id=excluded.big_id
         """, (mid, bid))
-
-
-def get_big(nickname: str) -> Optional[str]:
-    mid = _member_id_by_nick(nickname)
-    if mid is None:
-        return None
-    with _conn() as cx:
-        row = cx.execute("""
-            SELECT m.nickname
-            FROM family f JOIN members m ON f.big_id = m.id
-            WHERE f.member_id=?
-        """, (mid,)).fetchone()
-        return row[0] if row else None
-
-
-def get_littles(nickname: str) -> list[str]:
-    mid = _member_id_by_nick(nickname)
-    if mid is None:
-        return []
-    with _conn() as cx:
-        return [r[0] for r in cx.execute("""
-            SELECT m.nickname
-            FROM family f JOIN members m ON f.member_id = m.id
-            WHERE f.big_id=?
-        """, (mid,)).fetchall()]
-
-def add_skipped_number(number: int):
-    with _conn() as cx:
-        cx.execute("INSERT OR IGNORE INTO skipped_numbers (roll_number) VALUES (?)", (number,))
         cx.commit()
 
-def remove_skipped_number(number: int):
-    with _conn() as cx:
-        cx.execute("DELETE FROM skipped_numbers WHERE roll_number = ?", (number,))
-        cx.commit()
 
-def get_skipped_numbers():
+# ---------- reordering with block shifting ----------
+def reorder_member_shift(old_number: int, new_number: int):
+    """Move old_number to new_number and shift others in between.
+       Respects blackballed numbers; avoids UNIQUE collisions."""
+    if old_number == new_number:
+        return
     with _conn() as cx:
-        rows = cx.execute("SELECT roll_number FROM skipped_numbers ORDER BY roll_number ASC").fetchall()
-    return [row[0] for row in rows]
+        exists = cx.execute("SELECT 1 FROM members WHERE roll_number=?", (old_number,)).fetchone()
+        if not exists:
+            raise ValueError(f"No member with #{old_number}")
+
+        skipped = {r[0] for r in cx.execute("SELECT roll_number FROM skipped_numbers").fetchall()}
+
+        if new_number < old_number:
+            # Shift [new_number .. old_number-1] upward by +1 (skip blackballed)
+            rows = cx.execute("""
+                SELECT roll_number FROM members
+                WHERE roll_number BETWEEN ? AND ?
+                ORDER BY roll_number DESC
+            """, (new_number, old_number - 1)).fetchall()
+            affected = [r[0] for r in rows if r[0] not in skipped]
+            for n in affected:
+                t = n + 1
+                while t in skipped:
+                    t += 1
+                cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (t + 100000, n))
+            place = new_number
+            while place in skipped:
+                place += 1
+            cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (place + 100000, old_number))
+            cx.execute("UPDATE members SET roll_number=roll_number-100000 WHERE roll_number>=100000")
+            cx.commit()
+            return
+
+        # new_number > old_number
+        rows = cx.execute("""
+            SELECT roll_number FROM members
+            WHERE roll_number BETWEEN ? AND ?
+            ORDER BY roll_number ASC
+        """, (old_number + 1, new_number)).fetchall()
+        affected = [r[0] for r in rows if r[0] not in skipped]
+        for n in affected:
+            t = n - 1
+            while t in skipped:
+                t -= 1
+            cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (t + 100000, n))
+        place = new_number
+        while place in skipped:
+            place -= 1
+        cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (place + 100000, old_number))
+        cx.execute("UPDATE members SET roll_number=roll_number-100000 WHERE roll_number>=100000")
+        cx.commit()
