@@ -9,12 +9,10 @@ from typing import Optional, Iterable
 # On Railway set: DB_PATH=/data/roster.sqlite3 (persistent volume mounted at /data)
 DB_PATH = Path(os.environ.get("DB_PATH", "roster.sqlite3"))
 
-
 # ---------- connection ----------
 def _conn() -> sqlite3.Connection:
     cx = sqlite3.connect(DB_PATH)
     return cx
-
 
 # ---------- schema ----------
 def _add_column_if_missing(table: str, col: str, decl: str):
@@ -24,11 +22,10 @@ def _add_column_if_missing(table: str, col: str, decl: str):
             cx.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             cx.commit()
 
-
 def init_db() -> None:
     """Create tables if they don't exist, and add new columns idempotently."""
     with _conn() as cx:
-        # Classes: global ordered list
+        # Classes: globally ordered
         cx.execute("""
             CREATE TABLE IF NOT EXISTS classes(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +43,7 @@ def init_db() -> None:
                 last_name  TEXT    NOT NULL,
                 nickname   TEXT    NOT NULL,
                 full_name  TEXT,
-                join_order INTEGER NOT NULL,
+                join_order REAL    NOT NULL,   -- REAL so we can insert 0.5, then renormalize
                 roll_number INTEGER UNIQUE,
                 honorific  TEXT NOT NULL DEFAULT 'Mr.',
                 bio        TEXT DEFAULT NULL,
@@ -55,7 +52,7 @@ def init_db() -> None:
             );
         """)
 
-        # Member socials
+        # Socials
         cx.execute("""
             CREATE TABLE IF NOT EXISTS member_socials(
                 member_id INTEGER NOT NULL,
@@ -66,7 +63,7 @@ def init_db() -> None:
             );
         """)
 
-        # Family (one big; multiple littles via reverse lookup)
+        # Family (one big; littles via reverse lookup)
         cx.execute("""
             CREATE TABLE IF NOT EXISTS family(
                 member_id INTEGER PRIMARY KEY,
@@ -83,13 +80,12 @@ def init_db() -> None:
             );
         """)
 
-    # Profile fields (added safely)
+    # Profile fields
     _add_column_if_missing("members", "major", "TEXT")
     _add_column_if_missing("members", "age", "INTEGER")
     _add_column_if_missing("members", "ethnicity", "TEXT")
     _add_column_if_missing("members", "hometown", "TEXT")
     _add_column_if_missing("members", "discord_handle", "TEXT")
-
 
 # ---------- id helpers ----------
 def _class_id(name: str) -> Optional[int]:
@@ -97,73 +93,10 @@ def _class_id(name: str) -> Optional[int]:
         row = cx.execute("SELECT id FROM classes WHERE name=?", (name,)).fetchone()
         return row[0] if row else None
 
-
 def _member_id_by_nick(nick: str) -> Optional[int]:
     with _conn() as cx:
         row = cx.execute("SELECT id FROM members WHERE LOWER(nickname)=LOWER(?)", (nick,)).fetchone()
         return row[0] if row else None
-
-# ---------- edit join order ----------
-def _member_core_by_roll(roll_number: int):
-    """Return (id, class_id, join_order, nickname) for a roll number, or None."""
-    with _conn() as cx:
-        row = cx.execute(
-            "SELECT id, class_id, join_order, nickname FROM members WHERE roll_number=?",
-            (roll_number,)
-        ).fetchone()
-        return row  # (id, class_id, join_order, nickname) or None
-
-
-def _renormalize_join_order(class_id: int):
-    """Compact join_order to 1..N for a class, preserving current relative order."""
-    with _conn() as cx:
-        rows = cx.execute(
-            "SELECT id FROM members WHERE class_id=? ORDER BY join_order ASC, id ASC",
-            (class_id,)
-        ).fetchall()
-        for i, (mid,) in enumerate(rows, start=1):
-            cx.execute("UPDATE members SET join_order=? WHERE id=?", (i, mid))
-        cx.commit()
-
-
-def swap_display_positions(number_a: int, number_b: int):
-    """Swap two members' join_order within the (same) class. Roll numbers unchanged."""
-    a = _member_core_by_roll(number_a)
-    b = _member_core_by_roll(number_b)
-    if not a or not b:
-        raise ValueError("Both roll numbers must exist.")
-    a_id, a_cid, a_ord, _ = a
-    b_id, b_cid, b_ord, _ = b
-    if a_cid != b_cid:
-        raise ValueError("Members must be in the same class to swap display positions.")
-
-    with _conn() as cx:
-        # Use a temp to avoid unique conflicts if you ever enforce uniqueness on join_order
-        cx.execute("UPDATE members SET join_order=? WHERE id=?", (-1, a_id))
-        cx.execute("UPDATE members SET join_order=? WHERE id=?", (a_ord, b_id))
-        cx.execute("UPDATE members SET join_order=? WHERE id=?", (b_ord, a_id))
-        cx.commit()
-    _renormalize_join_order(a_cid)
-
-
-def move_display_after(number: int, target_after: int):
-    """Move 'number' to appear immediately after 'target_after' in the same class."""
-    src = _member_core_by_roll(number)
-    tgt = _member_core_by_roll(target_after)
-    if not src or not tgt:
-        raise ValueError("Both roll numbers must exist.")
-    s_id, s_cid, s_ord, _ = src
-    t_id, t_cid, t_ord, _ = tgt
-    if s_cid != t_cid:
-        raise ValueError("Members must be in the same class to move display order.")
-
-    with _conn() as cx:
-        # Put the source at a fractional position then renormalize.
-        new_ord = t_ord + 0.5
-        cx.execute("UPDATE members SET join_order=? WHERE id=?", (new_ord, s_id))
-        cx.commit()
-    _renormalize_join_order(s_cid)
-
 
 # ---------- skipped numbers ----------
 def add_skipped_number(number: int):
@@ -171,18 +104,15 @@ def add_skipped_number(number: int):
         cx.execute("INSERT OR IGNORE INTO skipped_numbers(roll_number) VALUES(?)", (number,))
         cx.commit()
 
-
 def remove_skipped_number(number: int):
     with _conn() as cx:
         cx.execute("DELETE FROM skipped_numbers WHERE roll_number=?", (number,))
         cx.commit()
 
-
 def get_skipped_numbers() -> list[int]:
     with _conn() as cx:
         rows = cx.execute("SELECT roll_number FROM skipped_numbers ORDER BY roll_number ASC").fetchall()
     return [r[0] for r in rows]
-
 
 # ---------- roll numbering ----------
 def _next_roll_number() -> int:
@@ -190,13 +120,12 @@ def _next_roll_number() -> int:
     with _conn() as cx:
         last = cx.execute("SELECT MAX(roll_number) FROM members").fetchone()[0]
         if last is None:
-            last = 1  # start at 2
+            last = 1  # so first assigned is #2
         skipped = {r[0] for r in cx.execute("SELECT roll_number FROM skipped_numbers").fetchall()}
         n = last + 1
         while n in skipped:
             n += 1
         return n
-
 
 # ---------- classes ----------
 def add_class(name: str, order_index: int) -> None:
@@ -204,10 +133,8 @@ def add_class(name: str, order_index: int) -> None:
         cx.execute("INSERT INTO classes(name, order_index) VALUES(?, ?)", (name.strip(), order_index))
         cx.commit()
 
-
 def remove_class(name: str) -> None:
     with _conn() as cx:
-        # Remove socials/family for members in this class
         cx.execute("""
             DELETE FROM member_socials
             WHERE member_id IN (
@@ -227,20 +154,18 @@ def remove_class(name: str) -> None:
         cx.execute("DELETE FROM classes WHERE name=?", (name,))
         cx.commit()
 
-
 def list_classes() -> Iterable[tuple[int, str, int]]:
     with _conn() as cx:
         return cx.execute("SELECT id, name, order_index FROM classes ORDER BY order_index ASC").fetchall()
-
 
 # ---------- members ----------
 def add_member(class_name: str, first_name: str, last_name: str, nickname: str, bio: Optional[str] = None) -> int:
     cid = _class_id(class_name)
     if cid is None:
         raise ValueError(f"Class '{class_name}' does not exist.")
-
     first_name, last_name, nickname = first_name.strip(), last_name.strip(), nickname.strip()
     with _conn() as cx:
+        # pick next display order within class
         join_order = cx.execute("SELECT COALESCE(MAX(join_order), 0) + 1 FROM members WHERE class_id=?", (cid,)).fetchone()[0]
         roll_number = _next_roll_number()
         full = f"{first_name} {last_name}"
@@ -250,7 +175,6 @@ def add_member(class_name: str, first_name: str, last_name: str, nickname: str, 
         """, (cid, first_name, last_name, nickname, full, join_order, roll_number, bio))
         cx.commit()
         return roll_number
-
 
 def remove_member(nickname: str) -> None:
     mid = _member_id_by_nick(nickname)
@@ -262,8 +186,7 @@ def remove_member(nickname: str) -> None:
         cx.execute("DELETE FROM members WHERE id=?", (mid,))
         cx.commit()
 
-
-# ---------- roster fetch (RAW fields) ----------
+# ---------- roster fetch ----------
 def get_roster():
     """
     Rows grouped by class:
@@ -279,7 +202,6 @@ def get_roster():
         """).fetchall()
     return rows
 
-
 def get_class_roster(class_name: str):
     with _conn() as cx:
         rows = cx.execute("""
@@ -290,7 +212,6 @@ def get_class_roster(class_name: str):
             ORDER BY m.join_order ASC
         """, (class_name,)).fetchall()
     return rows
-
 
 # ---------- lookups / cards ----------
 def lookup_members(first=None, last=None, nick=None, number=None):
@@ -304,7 +225,6 @@ def lookup_members(first=None, last=None, nick=None, number=None):
     q += " ORDER BY m.roll_number ASC"
     with _conn() as cx:
         return cx.execute(q, tuple(args)).fetchall()
-
 
 def get_member_card_by(fields: dict):
     where, args = [], []
@@ -354,7 +274,6 @@ def get_member_card_by(fields: dict):
         "hometown": hometown, "discord": discord_handle
     }
 
-
 def update_member_profile(nickname: str,
                           major: str | None = None,
                           age: int | None = None,
@@ -376,68 +295,6 @@ def update_member_profile(nickname: str,
         cx.execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?", tuple(args))
         cx.commit()
 
-
-# ---------- socials ----------
-def set_social(nickname: str, platform: str, handle: str) -> None:
-    mid = _member_id_by_nick(nickname)
-    if mid is None:
-        raise ValueError("Member not found.")
-    with _conn() as cx:
-        cx.execute("""
-            INSERT INTO member_socials(member_id, platform, handle)
-            VALUES(?,?,?)
-            ON CONFLICT(member_id, platform) DO UPDATE SET handle=excluded.handle
-        """, (mid, platform.lower(), handle))
-        cx.commit()
-
-
-def remove_social(nickname: str, platform: str) -> None:
-    mid = _member_id_by_nick(nickname)
-    if mid is None:
-        return
-    with _conn() as cx:
-        cx.execute("DELETE FROM member_socials WHERE member_id=? AND platform=?", (mid, platform.lower()))
-        cx.commit()
-
-
-# ---------- family ----------
-def set_big(nickname: str, big_nickname: Optional[str]) -> None:
-    mid = _member_id_by_nick(nickname)
-    if mid is None:
-        raise ValueError("Member not found.")
-    bid = None
-    if big_nickname:
-        bid = _member_id_by_nick(big_nickname)
-        if bid is None:
-            raise ValueError("Big not found.")
-    with _conn() as cx:
-        cx.execute("""
-            INSERT INTO family(member_id, big_id) VALUES(?,?)
-            ON CONFLICT(member_id) DO UPDATE SET big_id=excluded.big_id
-        """, (mid, bid))
-        cx.commit()
-
-
-# ---------- swapping ----------
-def reorder_member_swap(old_number: int, new_number: int):
-    """Swap the members occupying two roll numbers (keep roll numbers fixed)."""
-    with _conn() as cx:
-        a = cx.execute("SELECT id FROM members WHERE roll_number=?", (old_number,)).fetchone()
-        b = cx.execute("SELECT id FROM members WHERE roll_number=?", (new_number,)).fetchone()
-
-        if not a or not b:
-            raise ValueError("Both roll numbers must exist to swap members.")
-
-        a_id, b_id = a[0], b[0]
-
-        # Use a temporary placeholder to avoid UNIQUE constraint conflicts
-        temp = -999999
-        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (temp, a_id))
-        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (old_number, b_id))
-        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (new_number, a_id))
-        cx.commit()
-
-# ---------- editing ----------
 def update_member_name(nickname: str,
                        first_name: str | None = None,
                        last_name:  str | None = None,
@@ -462,14 +319,103 @@ def update_member_name(nickname: str,
         if new_nickname is not None: sets.append("nickname=?");   args.append(new_nickname)
         if honorific is not None:   sets.append("honorific=?");   args.append(honorific)
 
-        # Always refresh full_name if first/last changed
         if first_name is not None or last_name is not None:
             sets.append("full_name=?"); args.append(new_full)
 
         if not sets:
-            return  # nothing to change
+            return
 
         args.append(mid)
         cx.execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?", tuple(args))
         cx.commit()
 
+# ---------- socials ----------
+def set_social(nickname: str, platform: str, handle: str) -> None:
+    mid = _member_id_by_nick(nickname)
+    if mid is None:
+        raise ValueError("Member not found.")
+    with _conn() as cx:
+        cx.execute("""
+            INSERT INTO member_socials(member_id, platform, handle)
+            VALUES(?,?,?)
+            ON CONFLICT(member_id, platform) DO UPDATE SET handle=excluded.handle
+        """, (mid, platform.lower(), handle))
+        cx.commit()
+
+def remove_social(nickname: str, platform: str) -> None:
+    mid = _member_id_by_nick(nickname)
+    if mid is None:
+        return
+    with _conn() as cx:
+        cx.execute("DELETE FROM member_socials WHERE member_id=? AND platform=?", (mid, platform.lower()))
+        cx.commit()
+
+# ---------- family ----------
+def set_big(nickname: str, big_nickname: Optional[str]) -> None:
+    mid = _member_id_by_nick(nickname)
+    if mid is None:
+        raise ValueError("Member not found.")
+    bid = None
+    if big_nickname:
+        bid = _member_id_by_nick(big_nickname)
+        if bid is None:
+            raise ValueError("Big not found.")
+    with _conn() as cx:
+        cx.execute("""
+            INSERT INTO family(member_id, big_id) VALUES(?,?)
+            ON CONFLICT(member_id) DO UPDATE SET big_id=excluded.big_id
+        """, (mid, bid))
+        cx.commit()
+
+# ---------- display-only reordering ----------
+def _member_core_by_roll(roll_number: int):
+    """Return (id, class_id, join_order, nickname) for a roll number, or None."""
+    with _conn() as cx:
+        row = cx.execute(
+            "SELECT id, class_id, join_order, nickname FROM members WHERE roll_number=?",
+            (roll_number,)
+        ).fetchone()
+        return row  # (id, class_id, join_order, nickname) or None
+
+def _renormalize_join_order(class_id: int):
+    """Compact join_order to 1..N for a class, preserving current relative order."""
+    with _conn() as cx:
+        rows = cx.execute(
+            "SELECT id FROM members WHERE class_id=? ORDER BY join_order ASC, id ASC",
+            (class_id,)
+        ).fetchall()
+        for i, (mid,) in enumerate(rows, start=1):
+            cx.execute("UPDATE members SET join_order=? WHERE id=?", (i, mid))
+        cx.commit()
+
+def swap_display_positions(number_a: int, number_b: int):
+    """Swap two members' join_order within the same class. Roll numbers unchanged."""
+    a = _member_core_by_roll(number_a)
+    b = _member_core_by_roll(number_b)
+    if not a or not b:
+        raise ValueError("Both roll numbers must exist.")
+    a_id, a_cid, a_ord, _ = a
+    b_id, b_cid, b_ord, _ = b
+    if a_cid != b_cid:
+        raise ValueError("Members must be in the same class to swap display positions.")
+    with _conn() as cx:
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (-1, a_id))
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (a_ord, b_id))
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (b_ord, a_id))
+        cx.commit()
+    _renormalize_join_order(a_cid)
+
+def move_display_after(number: int, target_after: int):
+    """Move 'number' to appear immediately after 'target_after' in the same class."""
+    src = _member_core_by_roll(number)
+    tgt = _member_core_by_roll(target_after)
+    if not src or not tgt:
+        raise ValueError("Both roll numbers must exist.")
+    s_id, s_cid, s_ord, _ = src
+    t_id, t_cid, t_ord, _ = tgt
+    if s_cid != t_cid:
+        raise ValueError("Members must be in the same class to move display order.")
+    with _conn() as cx:
+        cx.execute("UPDATE members SET join_order=? WHERE id=?", (t_ord + 0.5, s_id))
+        cx.commit()
+    _renormalize_join_order(s_cid)
