@@ -362,6 +362,50 @@ async def lookup(interaction: discord.Interaction,
     view.add_item(PickBrother())
     await interaction.followup.send("Multiple matches found. Please choose:", view=view)
 
+
+# === IMPORT / EXPORT (Officers) ===
+@bot.tree.command(name="import_roster", description="(Officers) Import roster from an Excel/CSV attachment (Contact sheet).")
+@app_commands.describe(file="Attach .xlsx or .csv", clear_existing="Erase current DB first", create_missing="Create members that are not found", default_class="Class name for newly created members")
+async def import_roster(interaction: discord.Interaction,
+                        file: discord.Attachment,
+                        clear_existing: bool = False,
+                        create_missing: bool = True,
+                        default_class: str = "Imported"):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in (".xlsx",".xls",".csv"):
+            await interaction.followup.send("Please upload a .xlsx, .xls, or .csv file.", ephemeral=True); return
+        temp_path = f"/data/_import{ext}"
+        data = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(data)
+
+        if ext in (".xlsx",".xls"):
+            df = pd.read_excel(temp_path, sheet_name="Contact")
+        else:
+            df = pd.read_csv(temp_path)
+
+        db.import_roster_dataframe(df, clear_existing=clear_existing, create_missing=create_missing, default_class=default_class)
+        await interaction.followup.send("Roster imported successfully ✅", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Import error: {e}", ephemeral=True)
+
+@bot.tree.command(name="export_roster", description="(Officers) Export the roster as an Excel file.")
+async def export_roster(interaction: discord.Interaction):
+    if not await is_pd_or_president(interaction):
+        await interaction.response.send_message("Officers only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        df = db.export_roster_dataframe()
+        out_path = "/data/roster_export.xlsx"
+        df.to_excel(out_path, index=False)
+        await interaction.followup.send(file=discord.File(out_path, filename="roster_export.xlsx"), ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Export error: {e}", ephemeral=True)
+
 # ---------- MAIN ----------
 if __name__ == "__main__":
     if not TOKEN:
