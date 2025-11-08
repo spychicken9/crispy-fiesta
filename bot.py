@@ -277,11 +277,11 @@ async def set_profile(interaction: discord.Interaction, nickname: str,
 async def lookup(interaction: discord.Interaction,
                  number: int | None = None, first: str | None = None,
                  nick: str | None = None, last: str | None = None):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
 
     matches = db.lookup_members(first=first, last=last, nick=nick, number=number)
     if not matches:
-        await interaction.followup.send("No matching brothers found.", ephemeral=True)
+        await interaction.followup.send("No matching brothers found.", ephemeral=False)
         return
 
     def build_embed(roll, f, n, l, classname):
@@ -306,7 +306,7 @@ async def lookup(interaction: discord.Interaction,
 
     if len(matches) == 1:
         r, f, n, l, classname = matches[0]
-        await interaction.followup.send(embed=build_embed(r, f, n, l, classname), ephemeral=True)
+        await interaction.followup.send(embed=build_embed(r, f, n, l, classname), ephemeral=False)
         return
 
     options = [SelectOption(label=f"#{r} {f} “{n}” {l} — {classname}", value=str(r)) for (r, f, n, l, classname) in matches]
@@ -322,7 +322,7 @@ async def lookup(interaction: discord.Interaction,
 
     view = View()
     view.add_item(PickBrother())
-    await interaction.followup.send("Multiple matches found. Please choose:", view=view, ephemeral=True)
+    await interaction.followup.send("Multiple matches found. Please choose:", view=view, ephemeral=False)
 
 
 # ---------- MAIN ----------
