@@ -357,55 +357,21 @@ def set_big(nickname: str, big_nickname: Optional[str]) -> None:
         cx.commit()
 
 
-# ---------- reordering with block shifting ----------
-def reorder_member_shift(old_number: int, new_number: int):
-    """Move old_number to new_number and shift others in between.
-       Respects blackballed numbers; avoids UNIQUE collisions."""
-    if old_number == new_number:
-        return
+# ---------- swapping ----------
+def reorder_member_swap(old_number: int, new_number: int):
+    """Swap the members occupying two roll numbers (keep roll numbers fixed)."""
     with _conn() as cx:
-        exists = cx.execute("SELECT 1 FROM members WHERE roll_number=?", (old_number,)).fetchone()
-        if not exists:
-            raise ValueError(f"No member with #{old_number}")
+        a = cx.execute("SELECT id FROM members WHERE roll_number=?", (old_number,)).fetchone()
+        b = cx.execute("SELECT id FROM members WHERE roll_number=?", (new_number,)).fetchone()
 
-        skipped = {r[0] for r in cx.execute("SELECT roll_number FROM skipped_numbers").fetchall()}
+        if not a or not b:
+            raise ValueError("Both roll numbers must exist to swap members.")
 
-        if new_number < old_number:
-            # Shift [new_number .. old_number-1] upward by +1 (skip blackballed)
-            rows = cx.execute("""
-                SELECT roll_number FROM members
-                WHERE roll_number BETWEEN ? AND ?
-                ORDER BY roll_number DESC
-            """, (new_number, old_number - 1)).fetchall()
-            affected = [r[0] for r in rows if r[0] not in skipped]
-            for n in affected:
-                t = n + 1
-                while t in skipped:
-                    t += 1
-                cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (t + 100000, n))
-            place = new_number
-            while place in skipped:
-                place += 1
-            cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (place + 100000, old_number))
-            cx.execute("UPDATE members SET roll_number=roll_number-100000 WHERE roll_number>=100000")
-            cx.commit()
-            return
+        a_id, b_id = a[0], b[0]
 
-        # new_number > old_number
-        rows = cx.execute("""
-            SELECT roll_number FROM members
-            WHERE roll_number BETWEEN ? AND ?
-            ORDER BY roll_number ASC
-        """, (old_number + 1, new_number)).fetchall()
-        affected = [r[0] for r in rows if r[0] not in skipped]
-        for n in affected:
-            t = n - 1
-            while t in skipped:
-                t -= 1
-            cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (t + 100000, n))
-        place = new_number
-        while place in skipped:
-            place -= 1
-        cx.execute("UPDATE members SET roll_number=? WHERE roll_number=?", (place + 100000, old_number))
-        cx.execute("UPDATE members SET roll_number=roll_number-100000 WHERE roll_number>=100000")
+        # Use a temporary placeholder to avoid UNIQUE constraint conflicts
+        temp = -999999
+        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (temp, a_id))
+        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (old_number, b_id))
+        cx.execute("UPDATE members SET roll_number=? WHERE id=?", (new_number, a_id))
         cx.commit()

@@ -239,14 +239,17 @@ async def unskip_number(interaction: discord.Interaction, number: int):
 
 
 # ---------- COMMANDS: Reorder with automatic shifting ----------
-@bot.tree.command(name="reorder_member", description="(Officers) Move a brother to a new number and shift others automatically.")
-@app_commands.describe(old_number="Current number", new_number="Target number")
+@bot.tree.command(name="reorder_member", description="(Officers) Swap two brothers' roll numbers.")
+@app_commands.describe(old_number="Current roll number", new_number="Target roll number")
 async def reorder_member(interaction: discord.Interaction, old_number: int, new_number: int):
     if not await is_pd_or_president(interaction):
-        await interaction.response.send_message("Officers only.", ephemeral=True); return
+        await interaction.response.send_message("Officers only.", ephemeral=True)
+        return
     try:
-        db.reorder_member_shift(old_number, new_number)
-        await interaction.response.send_message(f"Moved **#{old_number}** → **#{new_number}** (shifted others).", ephemeral=True)
+        db.reorder_member_swap(old_number, new_number)
+        await interaction.response.send_message(
+            f"Swapped brothers #{old_number} and #{new_number}.", ephemeral=True
+        )
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
 
