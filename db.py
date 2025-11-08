@@ -474,7 +474,9 @@ def _clean_phone(v):
     return digits
 
 def _normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
-    return df.rename(columns={c: str(c).strip().lower(): c for c in df.columns})
+    # Convert all column headers to lowercase and strip whitespace
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
 
 def import_roster_dataframe(df: pd.DataFrame, clear_existing: bool = False, create_missing: bool = True, default_class: str = "Imported"):
     # Use Contact-like headers (case-insensitive)
@@ -590,19 +592,26 @@ def export_roster_dataframe() -> pd.DataFrame:
         "lineage","personality16","love_language","fascination_advantage","notes","interest",
         "member_id"
     ])
-    # socials
+
+    # Gather socials and bigs
+    socials_instagram, socials_x, socials_linkedin, socials_other, bigs = [], [], [], [], []
     with _conn() as cx:
-        socials_map = {}
         for mid in df["member_id"].tolist():
             s = dict(cx.execute("SELECT platform, handle FROM member_socials WHERE member_id=?", (mid,)).fetchall())
-            socials_map[mid] = s
-        bigs = []
-        for mid in df["member_id"].tolist():
-            r = cx.execute("SELECT m.nickname FROM family f JOIN members m ON f.big_id=m.id WHERE f.member_id=?", (mid,)).fetchone()
+            socials_instagram.append(s.get("instagram"))
+            socials_x.append(s.get("x"))
+            socials_linkedin.append(s.get("linkedin"))
+            socials_other.append(s.get("other"))
+            r = cx.execute(
+                "SELECT m.nickname FROM family f JOIN members m ON f.big_id=m.id WHERE f.member_id=?",
+                (mid,)
+            ).fetchone()
             bigs.append(r[0] if r else None)
+
     df.drop(columns=["member_id"], inplace=True)
     df["big_nickname"] = bigs
-    # explode common socials if present
-    for plat in ("instagram","x","linkedin","other"):
-        df[plat] = [socials_map.get(mid, {}).get(plat) for mid in []]  # noop placeholder
+    df["instagram"] = socials_instagram
+    df["x"] = socials_x
+    df["linkedin"] = socials_linkedin
+    df["other"] = socials_other
     return df
