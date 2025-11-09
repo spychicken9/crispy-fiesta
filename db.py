@@ -49,7 +49,7 @@ def init_db() -> None:
                 honorific    TEXT NOT NULL DEFAULT 'Mr.',
                 bio          TEXT,
 
-                -- profile core
+                -- profile core (old fields)
                 major        TEXT,
                 age          INTEGER,
                 ethnicity    TEXT,
@@ -63,8 +63,8 @@ def init_db() -> None:
                 su_id        TEXT,
                 standing     TEXT,
                 shirt_size   TEXT,
-                birthday     TEXT,        -- store as text YYYY-MM-DD
-                lineage      TEXT,
+                birthday     TEXT,        -- store as text YYYY-MM-DD or raw
+                lineage      TEXT,        -- family line label (NOT big nickname)
                 personality16 TEXT,
                 love_language TEXT,
                 fascination_advantage TEXT,
@@ -443,8 +443,8 @@ def move_display_after(number: int, target_after: int):
     _renormalize_join_order(s_cid)
 
 # ---------- Excel import/export ----------
+# Map your Contact sheet columns → DB fields (case-insensitive)
 _CONTACT_MAP = {
-    # Excel column name (case-insensitive) -> member field
     "last name": "last_name",
     "first name": "first_name",
     "phone": "phone",
@@ -459,11 +459,12 @@ _CONTACT_MAP = {
     "shirt size": "shirt_size",
     "birthday": "birthday",
     "lineage": "lineage",
-    "16 personalities": "personality16",
     "love language": "love_language",
     "fascination advantage": "fascination_advantage",
     "notes": "notes",
     "interest": "interest",
+    # personality16 only if your sheet has an explicit column
+    "16 personalities": "personality16",
 }
 
 def _clean_phone(v):
@@ -565,9 +566,14 @@ def import_roster_dataframe(df: pd.DataFrame, clear_existing: bool = False, crea
         _renormalize_join_order(cid)
 
 def import_roster_from_path(path: str, **kwargs):
+    # Prefer "Contact" sheet; else fall back to first sheet for xlsx
     ext = Path(path).suffix.lower()
     if ext in (".xlsx", ".xls"):
-        df = pd.read_excel(path, sheet_name="Contact")
+        try:
+            df = pd.read_excel(path, sheet_name="Contact")
+        except Exception:
+            xls = pd.ExcelFile(path)
+            df = pd.read_excel(path, sheet_name=xls.sheet_names[0])
     elif ext == ".csv":
         df = pd.read_csv(path)
     else:

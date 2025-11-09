@@ -1,4 +1,5 @@
-# bot.py
+# bot.py — Fraternity roster bot (Discord) with Excel import → SQLite storage.
+
 import os
 import discord
 from discord.ext import commands
@@ -6,14 +7,16 @@ from discord import app_commands
 from discord.ui import View, Select
 from discord import SelectOption
 
+import pandas as pd
+
 import db
 
 # ---------- CONFIG ----------
 TOKEN = os.environ.get("DISCORD_TOKEN")
-GUILD_ID = os.environ.get("1047618310012936313")  # optional; set to force instant guild sync
+GUILD_ID = os.environ.get("GUILD_ID")  # optional; set to force instant guild sync
 
 # Officer roles allowed to modify roster
-OFFICER_ROLES = {"President", "PD"}  # edit names to match your server
+OFFICER_ROLES = {"President", "PD"}  # exact role names
 
 # Intents (Message Content not required for slash commands)
 intents = discord.Intents.default()
@@ -65,6 +68,26 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
             await interaction.response.send_message(f"Error: {error}", ephemeral=True)
     except Exception as e:
         print("Failed to notify user:", e)
+
+# ---------- BASIC TEST ----------
+@bot.tree.command(name="ping", description="Ping")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("pong", ephemeral=True)
+
+@bot.tree.command(name="sync", description="Admin: force re-sync slash commands.")
+async def sync(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Admins only.", ephemeral=True); return
+    try:
+        if os.environ.get("GUILD_ID"):
+            guild = discord.Object(id=int(os.environ["GUILD_ID"]))
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+        else:
+            await bot.tree.sync()
+        await interaction.response.send_message("Slash commands synced.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Sync error: {e}", ephemeral=True)
 
 # ---------- COMMANDS: Classes & Roster ----------
 @bot.tree.command(name="add_class", description="(Officers) Add a class.")
@@ -132,7 +155,7 @@ async def roster(interaction: discord.Interaction, class_name: str | None = None
 
         rows = db.get_roster()  # (class, first, nick, last, roll, honor)
         if not rows:
-            await interaction.followup.send("No classes yet. Ask an officer to add some.", ephemeral=True); return
+            await interaction.followup.send("No classes yet. Ask an officer to add some or import.", ephemeral=True); return
 
         embeds, cur_class, buf = [], None, []
         def push():
@@ -293,21 +316,6 @@ async def edit_profile(interaction: discord.Interaction, nickname: str,
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
 
-@bot.tree.command(name="edit_social", description="(Officers) Add or update a member's social handle.")
-@app_commands.describe(
-    nickname="Member nickname",
-    platform="instagram / x / linkedin / other",
-    handle="Handle or URL (e.g., @name or https://...)"
-)
-async def edit_social(interaction: discord.Interaction, nickname: str, platform: str, handle: str):
-    if not await is_pd_or_president(interaction):
-        await interaction.response.send_message("Officers only (PD/President).", ephemeral=True); return
-    try:
-        db.set_social(nickname, platform, handle)  # upsert
-        await interaction.response.send_message(f"Updated **{platform}** for **{nickname}**.", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
-
 # ---------- COMMANDS: Lookup (PUBLIC) ----------
 @bot.tree.command(name="lookup", description="Find a brother by number, name, or nickname.")
 @app_commands.describe(number="Roll number", first="First name", nick="Nickname", last="Last name")
@@ -328,15 +336,28 @@ async def lookup(interaction: discord.Interaction,
         ansi_title = "```ansi\n" + title_line + "\n```"
 
         lines = [f"**Class:** {info['class']}"]
-        if info.get("major"):     lines.append(f"**Major:** {info['major']}")
-        if info.get("age"):       lines.append(f"**Age:** {info['age']}")
-        if info.get("ethnicity"): lines.append(f"**Ethnicity:** {info['ethnicity']}")
-        if info.get("hometown"):  lines.append(f"**Hometown:** {info['hometown']}")
-        if info.get("discord"):   lines.append(f"**Discord:** {info['discord']}")
-        if info.get("big"):       lines.append(f"**Big:** {info['big']}")
-        if info.get("littles"):   lines.append(f"**Littles:** " + ", ".join(info["littles"]))
-        if info.get("socials"):   lines.append("**Socials:** " + " | ".join(f"{k.capitalize()}: {v}" for k, v in info["socials"].items()))
-        if info.get("bio"):       lines.append(f"**Bio:** {info['bio']}")
+        # Contact/extended fields
+        if info.get("phone"):      lines.append(f"**Phone:** {info['phone']}")
+        if info.get("su_email"):   lines.append(f"**Syracuse Email:** {info['su_email']}")
+        if info.get("personal_email"): lines.append(f"**Personal Email:** {info['personal_email']}")
+        if info.get("su_id"):      lines.append(f"**SU ID:** {info['su_id']}")
+        if info.get("standing"):   lines.append(f"**Standing:** {info['standing']}")
+        if info.get("major"):      lines.append(f"**Major:** {info['major']}")
+        if info.get("ethnicity"):  lines.append(f"**Ethnicity:** {info['ethnicity']}")
+        if info.get("hometown"):   lines.append(f"**Hometown:** {info['hometown']}")
+        if info.get("shirt_size"): lines.append(f"**Shirt Size:** {info['shirt_size']}")
+        if info.get("birthday"):   lines.append(f"**Birthday:** {info['birthday']}")
+        if info.get("lineage"):    lines.append(f"**Lineage:** {info['lineage']}")
+        if info.get("personality16"): lines.append(f"**16 Personalities:** {info['personality16']}")
+        if info.get("love_language"): lines.append(f"**Love Language:** {info['love_language']}")
+        if info.get("fascination_advantage"): lines.append(f"**Fascination Advantage:** {info['fascination_advantage']}")
+        if info.get("discord"):    lines.append(f"**Discord:** {info['discord']}")
+        if info.get("big"):        lines.append(f"**Big:** {info['big']}")
+        if info.get("littles"):    lines.append(f"**Littles:** " + ", ".join(info["littles"]))
+        if info.get("socials"):    lines.append("**Socials:** " + " | ".join(f"{k.capitalize()}: {v}" for k, v in info["socials"].items()))
+        if info.get("notes"):      lines.append(f"**Notes:** {info['notes']}")
+        if info.get("interest"):   lines.append(f"**Interest:** {info['interest']}")
+        if info.get("bio"):        lines.append(f"**Bio:** {info['bio']}")
 
         e = discord.Embed(title=f"#{info['roll']} Mr. {info['first']} “{info['nick']}” {info['last']}",
                           description=ansi_title + "\n" + "\n".join(lines))
@@ -362,8 +383,7 @@ async def lookup(interaction: discord.Interaction,
     view.add_item(PickBrother())
     await interaction.followup.send("Multiple matches found. Please choose:", view=view)
 
-
-# === IMPORT / EXPORT (Officers) ===
+# ---------- IMPORT / EXPORT (Officers) ----------
 @bot.tree.command(name="import_roster", description="(Officers) Import roster from an Excel/CSV attachment (Contact sheet).")
 @app_commands.describe(file="Attach .xlsx or .csv", clear_existing="Erase current DB first", create_missing="Create members that are not found", default_class="Class name for newly created members")
 async def import_roster(interaction: discord.Interaction,
@@ -384,7 +404,12 @@ async def import_roster(interaction: discord.Interaction,
             f.write(data)
 
         if ext in (".xlsx",".xls"):
-            df = pd.read_excel(temp_path, sheet_name="Contact")
+            # Prefer "Contact" sheet; fallback to first sheet if not found
+            try:
+                df = pd.read_excel(temp_path, sheet_name="Contact")
+            except Exception:
+                xls = pd.ExcelFile(temp_path)
+                df = pd.read_excel(temp_path, sheet_name=xls.sheet_names[0])
         else:
             df = pd.read_csv(temp_path)
 
